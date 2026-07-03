@@ -656,4 +656,43 @@ defmodule Ash.Test.Actions.BulkDestroyManualTest do
     assert result.error_count == 0
     assert result.errors == nil
   end
+
+  # Regression: the bulk pipeline chose the batch vs. single-record path with
+  # `function_exported?(mod, :bulk_destroy/:bulk_update, 3)`, which returns false
+  # for a not-yet-loaded module. A manual action module is only referenced as
+  # data (`manual: {Mod, opts}`) and thus lazily loaded, so the first bulk call
+  # took the single-record fallback. For a soft destroy (routed through the
+  # update pipeline) that fallback reads the `:bulk_update` context key, which a
+  # soft destroy never sets (it sets `:bulk_destroy`), crashing with a
+  # BadMapError. The manual module lives in `test/support` (compiled to disk) so
+  # it can be unloaded and then reloaded on demand via `Code.ensure_loaded?/1`.
+  test "bulk soft-destroy works when the manual module starts unloaded" do
+    alias Ash.Test.LazyManualSoftDestroy, as: Post
+
+    posts =
+      for i <- 1..3 do
+        Post
+        |> Ash.Changeset.for_create(:create, %{name: "Post #{i}"})
+        |> Ash.create!()
+      end
+
+    # Simulate the manual module not being loaded yet, exactly as when it is
+    # only referenced as data in the action definition.
+    :code.purge(Post.Manual)
+    :code.delete(Post.Manual)
+    refute :code.is_loaded(Post.Manual)
+
+    result =
+      posts
+      |> Ash.bulk_destroy(:archive, %{},
+        resource: Post,
+        return_records?: true,
+        return_errors?: true,
+        strategy: :stream
+      )
+
+    assert result.error_count == 0
+    assert Enum.count(result.records) == 3
+    assert Enum.all?(result.records, & &1.archived)
+  end
 end
